@@ -115,7 +115,7 @@ async function readFirstSheet(
 
   return XLSX.utils.sheet_to_json(sheet, {
     header: 1,
-    raw: true,
+    raw: false,
     defval: ""
   }) as unknown[][];
 }
