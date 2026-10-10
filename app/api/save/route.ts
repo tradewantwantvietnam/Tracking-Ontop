@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 
 
 // ==================================================
-// KIỂM TRA CẤU HÌNH
+// ĐỌC CẤU HÌNH MÁY CHỦ
 // ==================================================
 
 function getConfig() {
@@ -38,7 +38,7 @@ function getConfig() {
 async function callAppsScript(
   params: Record<string, string>,
   body?: Record<string, unknown>
-) {
+): Promise<any> {
   const config = getConfig();
 
   const url = new URL(config.scriptUrl);
@@ -49,26 +49,37 @@ async function callAppsScript(
     }
   );
 
-  if (body) {
-    const response = await fetch(url.toString(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "text/plain;charset=utf-8"
-      },
-      body: JSON.stringify({
-        ...body,
-        token: config.token
-      }),
-      cache: "no-store",
-      redirect: "follow"
-    });
 
-    const text = await response.text();
+  // ----------------------------------------------
+  // POST: LƯU BÁO CÁO
+  // ----------------------------------------------
+
+  if (body) {
+    const response = await fetch(
+      url.toString(),
+      {
+        method: "POST",
+
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8"
+        },
+
+        body: JSON.stringify({
+          ...body,
+          token: config.token
+        }),
+
+        cache: "no-store",
+        redirect: "follow"
+      }
+    );
+
+    const responseText = await response.text();
 
     let result: any;
 
     try {
-      result = JSON.parse(text);
+      result = JSON.parse(responseText);
     } catch {
       throw new Error(
         "Apps Script không trả về JSON hợp lệ. " +
@@ -86,30 +97,41 @@ async function callAppsScript(
     return result;
   }
 
-  url.searchParams.set("token", config.token);
 
-  const response = await fetch(url.toString(), {
-    method: "GET",
-    cache: "no-store",
-    redirect: "follow"
-  });
+  // ----------------------------------------------
+  // GET: ĐỌC THÁNG HOẶC LỊCH SỬ
+  // ----------------------------------------------
 
-  const text = await response.text();
+  url.searchParams.set(
+    "token",
+    config.token
+  );
+
+  const response = await fetch(
+    url.toString(),
+    {
+      method: "GET",
+      cache: "no-store",
+      redirect: "follow"
+    }
+  );
+
+  const responseText = await response.text();
 
   let result: any;
 
   try {
-    result = JSON.parse(text);
+    result = JSON.parse(responseText);
   } catch {
     throw new Error(
-      "Không đọc được phản hồi lịch sử từ Apps Script."
+      "Không đọc được phản hồi từ Apps Script."
     );
   }
 
   if (!response.ok || !result.ok) {
     throw new Error(
       result.error ||
-      "Không tải được dữ liệu Google Sheets."
+      "Không tải được dữ liệu từ Google Sheets."
     );
   }
 
@@ -118,7 +140,7 @@ async function callAppsScript(
 
 
 // ==================================================
-// GET: LẤY DANH SÁCH THÁNG HOẶC LỊCH SỬ MỘT THÁNG
+// GET: LẤY DANH SÁCH THÁNG / DỮ LIỆU THÁNG
 // ==================================================
 
 export async function GET(request: Request) {
@@ -126,7 +148,9 @@ export async function GET(request: Request) {
     const requestUrl = new URL(request.url);
 
     const action =
-      requestUrl.searchParams.get("action") || "months";
+      requestUrl.searchParams.get("action") ||
+      "months";
+
 
     if (action === "months") {
       const result = await callAppsScript({
@@ -136,15 +160,19 @@ export async function GET(request: Request) {
       return NextResponse.json(result);
     }
 
+
     if (action === "report") {
       const month =
         requestUrl.searchParams.get("month") || "";
 
-      if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      if (
+        !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)
+      ) {
         return NextResponse.json(
           {
             ok: false,
-            error: "Tháng không hợp lệ."
+            error:
+              "Tháng không hợp lệ. Dùng định dạng YYYY-MM."
           },
           { status: 400 }
         );
@@ -157,6 +185,7 @@ export async function GET(request: Request) {
 
       return NextResponse.json(result);
     }
+
 
     return NextResponse.json(
       {
@@ -172,7 +201,7 @@ export async function GET(request: Request) {
         ok: false,
         error:
           error?.message ||
-          "Không thể kết nối Apps Script."
+          "Không thể kết nối Google Apps Script."
       },
       { status: 500 }
     );
@@ -181,51 +210,64 @@ export async function GET(request: Request) {
 
 
 // ==================================================
-// POST: LƯU BÁO CÁO CỦA THÁNG ĐANG CHỌN
+// POST: LƯU DỮ LIỆU MỘT THÁNG
 // ==================================================
 
 export async function POST(request: Request) {
   try {
     const payload = await request.json();
 
-    const month = String(payload.month || "");
-
-    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error:
-            "Vui lòng chọn tháng hợp lệ trước khi lưu."
-        },
-        { status: 400 }
-      );
-    }
+    const month = String(
+      payload.month || ""
+    );
 
     if (
-      !Array.isArray(payload.allocation) ||
-      !payload.report
+      !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)
     ) {
       return NextResponse.json(
         {
           ok: false,
-          error: "Thiếu dữ liệu phân bổ hoặc báo cáo."
+          error: "Vui lòng chọn tháng hợp lệ."
         },
         { status: 400 }
       );
     }
 
-    // Không gửi toàn bộ file 5.1 gốc.
-    // Chỉ gửi dữ liệu phân bổ và báo cáo đã tổng hợp.
-    // Nhờ vậy giảm dung lượng truyền dữ liệu.
+
+    // Bắt buộc có đủ phân bổ, mapping và báo cáo.
+    if (
+      !Array.isArray(payload.allocation) ||
+      !Array.isArray(payload.programMap) ||
+      !payload.report ||
+      !Array.isArray(payload.report.summaries) ||
+      !Array.isArray(payload.report.npps) ||
+      !Array.isArray(payload.report.warnings) ||
+      !Array.isArray(payload.report.usedOrders)
+    ) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "Thiếu file phân bổ, file Tên CT hoặc kết quả báo cáo."
+        },
+        { status: 400 }
+      );
+    }
+
+
+    // Không gửi toàn bộ 41 cột của file 5.1.
+    // Chỉ gửi kết quả đã xử lý và ba nguồn dữ liệu cần lưu.
     const result = await callAppsScript(
       {},
       {
         action: "saveReport",
         month,
         allocation: payload.allocation,
+        programMap: payload.programMap,
         report: payload.report
       }
     );
+
 
     return NextResponse.json({
       ok: true,
@@ -241,7 +283,7 @@ export async function POST(request: Request) {
         ok: false,
         error:
           error?.message ||
-          "Không lưu được báo cáo."
+          "Không lưu được báo cáo vào Google Sheets."
       },
       { status: 500 }
     );
