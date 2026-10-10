@@ -1,18 +1,15 @@
 "use client";
 
-import {
-  useEffect,
-  useMemo,
-  useState
-} from "react";
-
+import { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 
 import {
   parseActual,
   parseAllocation,
+  parseProgramMapping,
   type Actual,
-  type Allocation
+  type Allocation,
+  type ProgramMapping
 } from "../lib/parse";
 
 
@@ -93,7 +90,7 @@ type UsedScope = {
 // HÀM HỖ TRỢ
 // ==================================================
 
-function currentMonth(): string {
+function getCurrentMonth(): string {
   const date = new Date();
 
   return (
@@ -101,6 +98,39 @@ function currentMonth(): string {
     "-" +
     String(date.getMonth() + 1).padStart(2, "0")
   );
+}
+
+function cleanText(value: unknown): string {
+  return String(value ?? "")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function normalizeKey(value: string): string {
+  return cleanText(value).toLocaleLowerCase("vi");
+}
+
+function mappingKey(
+  areaName: string,
+  programName: string
+): string {
+  return (
+    normalizeKey(areaName) +
+    "|||" +
+    normalizeKey(programName)
+  );
+}
+
+function detailKey(
+  regionName: string,
+  areaName: string,
+  programName: string
+): string {
+  return [
+    normalizeKey(regionName),
+    normalizeKey(areaName),
+    normalizeKey(programName)
+  ].join("|||");
 }
 
 function money(value: number): string {
@@ -117,53 +147,20 @@ function fmt(value: number): string {
   }).format(value);
 }
 
-function cleanText(value: unknown): string {
-  return String(value ?? "")
-    .trim()
-    .replace(/\s+/g, " ");
-}
-
-function normalizeKey(value: string): string {
-  return cleanText(value).toLocaleLowerCase("vi");
-}
-
-function mappingKey(
-  areaName: string,
-  programCode: string
-): string {
-  return (
-    normalizeKey(areaName) +
-    "|||" +
-    normalizeKey(programCode)
-  );
-}
-
-function detailKey(
-  regionName: string,
-  areaName: string,
-  programName: string
-): string {
-  return [
-    normalizeKey(regionName),
-    normalizeKey(areaName),
-    normalizeKey(programName)
-  ].join("|||");
-}
-
 function uniqueInOrder(values: string[]): string[] {
   const result: string[] = [];
   const seen = new Set<string>();
 
   for (const value of values) {
-    const text = cleanText(value);
+    const name = cleanText(value);
 
-    if (!text) continue;
+    if (!name) continue;
 
-    const key = normalizeKey(text);
+    const key = normalizeKey(name);
 
     if (!seen.has(key)) {
       seen.add(key);
-      result.push(text);
+      result.push(name);
     }
   }
 
@@ -217,77 +214,108 @@ function statusClass(status: string): string {
 
 
 // ==================================================
-// TÍNH TOÁN VÀ GỘP DỮ LIỆU
+// XỬ LÝ DỮ LIỆU
 // ==================================================
 
 function buildReport(
   allocations: Allocation[],
+  mappings: ProgramMapping[],
   actuals: Actual[]
 ): Report {
 
   // ----------------------------------------------
-  // A. MAPPING: VÙNG + MÃ CT -> DÒNG PHÂN BỔ
+  // A. TẠO BẢNG QUY ƯỚC MÃ CT -> TÊN CT
   // ----------------------------------------------
 
-  const allocationByCode: Map<string, Allocation> =
+  const programByCode: Map<string, string> =
     new Map();
 
-  for (const item of allocations) {
-    const key = mappingKey(
-      item.areaName,
-      item.programCode
-    );
+  for (const item of mappings) {
+    const code = normalizeKey(item.programCode);
+    const title = cleanText(item.programName);
 
-    if (allocationByCode.has(key)) {
-      throw new Error(
-        "File phân bổ có Tên vùng + Mã CT bị trùng: " +
-        item.areaName +
-        " / " +
-        item.programCode +
-        ". Hãy kiểm tra file phân bổ."
-      );
+    if (!code || !title) continue;
+
+    if (programByCode.has(code)) {
+      const oldTitle = programByCode.get(code)!;
+
+      if (normalizeKey(oldTitle) !== normalizeKey(title)) {
+        throw new Error(
+          "Một mã CT đang được gán cho nhiều Tên CT. " +
+          "Hãy kiểm tra file Tên CT."
+        );
+      }
+
+      continue;
     }
 
-    allocationByCode.set(key, item);
+    programByCode.set(code, title);
+  }
+
+  if (programByCode.size === 0) {
+    throw new Error(
+      "File Tên CT chưa có quy ước Mã CT / Tên CT hợp lệ."
+    );
   }
 
 
   // ----------------------------------------------
-  // B. TỔNG PHÂN BỔ
+  // B. PHÂN BỔ THEO TÊN VÙNG + TÊN CT
   //
-  // Gộp các MÃ CT có cùng TÊN CT.
-  // Giữ thứ tự lần xuất hiện đầu tiên từ file phân bổ.
+  // File 5.1 không có cột miền được phép đọc,
+  // do đó Tên vùng + Tên CT phải xác định duy nhất
+  // một dòng phân bổ.
   // ----------------------------------------------
+
+  const allocationByAreaAndProgram: Map<
+    string,
+    Allocation
+  > = new Map();
 
   const summaryMap: Map<string, Summary> =
     new Map();
 
   for (const item of allocations) {
-    const programName =
-      cleanText(item.programName) ||
-      "Chưa đặt tên CT";
+    const programName = cleanText(item.programName);
 
-    const key = detailKey(
+    const key = mappingKey(
+      item.areaName,
+      programName
+    );
+
+    if (allocationByAreaAndProgram.has(key)) {
+      const existing =
+        allocationByAreaAndProgram.get(key)!;
+
+      throw new Error(
+        "Tên vùng + Tên CT bị trùng hoặc không xác định được miền: " +
+        item.areaName +
+        " / " +
+        programName +
+        ". Vì file 5.1 không có cột miền trong phạm vi dữ liệu, " +
+        "cặp này phải xác định duy nhất một dòng phân bổ. " +
+        "Hãy kiểm tra file phân bổ."
+      );
+    }
+
+    allocationByAreaAndProgram.set(key, item);
+
+    const parentKey = detailKey(
       item.regionName,
       item.areaName,
       programName
     );
 
-    if (!summaryMap.has(key)) {
-      summaryMap.set(key, {
-        regionName: item.regionName,
-        areaName: item.areaName,
-        programName,
-        allocation: 0,
-        used: 0,
-        discount: 0,
-        percent: 0,
-        status: "Bình thường"
-      });
-    }
-
-    summaryMap.get(key)!.allocation +=
-      Number(item.allocation) || 0;
+    summaryMap.set(parentKey, {
+      regionName: item.regionName,
+      areaName: item.areaName,
+      programName,
+      allocation: Number(item.allocation) || 0,
+      used: 0,
+      discount: 0,
+      percent: 0,
+      status: "Bình thường"
+    });
   }
 
 
@@ -295,14 +323,16 @@ function buildReport(
   // C. NHÓM ĐƠN HÀNG
   //
   // Khử trùng theo:
-  // TÊN CT + VÙNG + MÃ ĐƠN HÀNG.
+  // Tên CT + Tên vùng + Mã đơn hàng.
   //
-  // Không dùng Mã CT làm khóa khử trùng.
+  // Nhiều mã CT cùng Tên CT sẽ chỉ tạo tối đa
+  // một suất cho cùng một đơn hàng trong vùng.
   // ----------------------------------------------
 
   type OrderRecord = {
     row: Actual;
     allocation: Allocation;
+    programName: string;
   };
 
   type OrderGroup = {
@@ -319,7 +349,7 @@ function buildReport(
 
 
   // ----------------------------------------------
-  // D. GHI NHẬN NPP
+  // D. TỔNG HỢP THEO NPP
   // ----------------------------------------------
 
   const nppMap: Map<string, NppSummary> =
@@ -338,7 +368,11 @@ function buildReport(
       "(Không có tên NPP)";
 
     const key =
-      detailKey(regionName, areaName, programName) +
+      detailKey(
+        regionName,
+        areaName,
+        programName
+      ) +
       "|||" +
       normalizeKey(displayName);
 
@@ -371,31 +405,29 @@ function buildReport(
 
 
   // ----------------------------------------------
-  // F. XỬ LÝ TỪNG DÒNG 5.1
+  // F. ĐỌC TỪNG DÒNG FILE 5.1
   // ----------------------------------------------
 
   actuals.forEach((row, rowIndex) => {
-    const allocation = allocationByCode.get(
-      mappingKey(row.areaName, row.programCode)
-    );
+    const programCode = normalizeKey(row.programCode);
 
+    // Tìm Tên CT từ file quy ước.
+    const programName =
+      programByCode.get(programCode);
 
     // --------------------------------------------
-    // F1. KHÔNG TÌM THẤY PHÂN BỔ
+    // F1. MÃ CT CHƯA CÓ TRONG FILE TÊN CT
     // --------------------------------------------
 
-    if (!allocation) {
+    if (!programName) {
       const orderCode = cleanText(row.orderCode);
 
-      const warningKey = orderCode
-        ? (
-            normalizeKey(row.areaName) +
-            "|||" +
-            normalizeKey(row.programCode) +
-            "|||" +
-            normalizeKey(orderCode)
-          )
-        : "MISSING_ORDER_" + rowIndex;
+      const warningKey = [
+        "UNKNOWN_PROGRAM",
+        normalizeKey(row.areaName),
+        programCode,
+        normalizeKey(orderCode || String(rowIndex))
+      ].join("|||");
 
       if (!unmatchedWarnings.has(warningKey)) {
         unmatchedWarnings.set(warningKey, {
@@ -406,7 +438,7 @@ function buildReport(
           orderCode,
           discount: 0,
           reason:
-            "Không tìm thấy Tên vùng + Mã CT trong file phân bổ"
+            "Mã CT chưa được khai báo trong file Tên CT."
         });
       }
 
@@ -417,9 +449,44 @@ function buildReport(
     }
 
 
-    const programName =
-      cleanText(allocation.programName) ||
-      "Chưa đặt tên CT";
+    // --------------------------------------------
+    // F2. TÊN VÙNG + TÊN CT KHÔNG CÓ PHÂN BỔ
+    // --------------------------------------------
+
+    const allocation =
+      allocationByAreaAndProgram.get(
+        mappingKey(row.areaName, programName)
+      );
+
+    if (!allocation) {
+      const orderCode = cleanText(row.orderCode);
+
+      const warningKey = [
+        "NO_ALLOCATION",
+        normalizeKey(row.areaName),
+        normalizeKey(programName),
+        normalizeKey(orderCode || String(rowIndex))
+      ].join("|||");
+
+      if (!unmatchedWarnings.has(warningKey)) {
+        unmatchedWarnings.set(warningKey, {
+          regionName: "",
+          areaName: row.areaName,
+          programName,
+          npp: row.npp,
+          orderCode,
+          discount: 0,
+          reason:
+            "Không có cặp Tên vùng + Tên CT trong file phân bổ."
+        });
+      }
+
+      unmatchedWarnings.get(warningKey)!.discount +=
+        Number(row.discount) || 0;
+
+      return;
+    }
+
 
     const parentKey = detailKey(
       allocation.regionName,
@@ -431,13 +498,14 @@ function buildReport(
 
 
     // --------------------------------------------
-    // F2. THIẾU MÃ ĐƠN HÀNG
+    // F3. THIẾU MÃ ĐƠN HÀNG
+    //
+    // Có phân bổ: vẫn cộng AK nhưng không tính suất.
     // --------------------------------------------
 
     if (!cleanText(row.orderCode)) {
       const discount = Number(row.discount) || 0;
 
-      // Vẫn cộng tiền, không tự đếm suất.
       summary.discount += discount;
 
       addNpp(
@@ -466,7 +534,7 @@ function buildReport(
 
 
     // --------------------------------------------
-    // F3. NHÓM ĐƠN HÀNG THEO TÊN CT + VÙNG + W
+    // F4. NHÓM ĐƠN HÀNG
     // --------------------------------------------
 
     const orderKey = [
@@ -490,13 +558,14 @@ function buildReport(
 
     group.records.push({
       row,
-      allocation
+      allocation,
+      programName
     });
 
-    // Cộng mọi dòng AK của đơn hàng.
+    // Cộng tất cả AK của các dòng trong đơn hàng.
     group.discount += Number(row.discount) || 0;
 
-    // Chỉ cần ít nhất một AK > 0.
+    // Chỉ cần một dòng AK > 0.
     if (Number(row.discount) > 0) {
       group.hasPositive = true;
     }
@@ -504,39 +573,42 @@ function buildReport(
 
 
   // ----------------------------------------------
-  // G. TÍNH SUẤT ĐÃ DÙNG VÀ CHI TIẾT ĐƠN HÀNG
+  // G. TÍNH SUẤT ĐÃ DÙNG VÀ TIỀN CHIẾT KHẤU
   // ----------------------------------------------
 
   const usedOrders: UsedOrder[] = [];
 
   for (const group of orderGroups.values()) {
-    const summaryKey = detailKey(
+    const parentKey = detailKey(
       group.regionName,
       group.areaName,
       group.programName
     );
 
-    const summary = summaryMap.get(summaryKey);
+    const summary = summaryMap.get(parentKey);
 
     if (!summary) continue;
 
-    // Tiền chiết khấu được cộng tất cả các dòng.
+    // Tổng tiền AK của mọi dòng thuộc đơn hàng.
     summary.discount += group.discount;
 
-    // Nhóm không có AK dương không sử dụng suất.
+    // Một đơn hàng đủ điều kiện chỉ được tính một suất.
     if (group.hasPositive) {
       summary.used += 1;
     }
 
 
     // --------------------------------------------
-    // G1. GỘP CHIẾT KHẤU THEO NPP
+    // G1. GỘP TIỀN THEO NPP
     // --------------------------------------------
 
-    const discountsByNpp: Map<string, {
-      nppName: string;
+    type NppDiscount = {
+      name: string;
       discount: number;
-    }> = new Map();
+    };
+
+    const nppDiscounts: Map<string, NppDiscount> =
+      new Map();
 
     for (const record of group.records) {
       const name =
@@ -545,14 +617,14 @@ function buildReport(
 
       const key = normalizeKey(name);
 
-      if (!discountsByNpp.has(key)) {
-        discountsByNpp.set(key, {
-          nppName: name,
+      if (!nppDiscounts.has(key)) {
+        nppDiscounts.set(key, {
+          name,
           discount: 0
         });
       }
 
-      discountsByNpp.get(key)!.discount +=
+      nppDiscounts.get(key)!.discount +=
         Number(record.row.discount) || 0;
     }
 
@@ -560,9 +632,9 @@ function buildReport(
     // --------------------------------------------
     // G2. GÁN SUẤT CHO NPP
     //
-    // Mỗi đơn hàng chỉ có một suất.
-    // Suất gán cho NPP đầu tiên trên dòng AK > 0.
-    // Tiền vẫn được ghi riêng theo từng NPP.
+    // Nếu một đơn hàng có nhiều NPP:
+    // - Chỉ giao một suất cho NPP đầu tiên có AK > 0.
+    // - Tiền AK cộng riêng theo từng NPP.
     // --------------------------------------------
 
     const firstPositiveRecord = group.records.find(
@@ -577,10 +649,10 @@ function buildReport(
           )
         : "";
 
-    for (const item of discountsByNpp.values()) {
+    for (const item of nppDiscounts.values()) {
       const usedToAdd =
         group.hasPositive &&
-        normalizeKey(item.nppName) === normalizeKey(slotOwner)
+        normalizeKey(item.name) === normalizeKey(slotOwner)
           ? 1
           : 0;
 
@@ -588,7 +660,7 @@ function buildReport(
         group.regionName,
         group.areaName,
         group.programName,
-        item.nppName,
+        item.name,
         item.discount,
         usedToAdd
       );
@@ -596,7 +668,7 @@ function buildReport(
 
 
     // --------------------------------------------
-    // G3. LƯU CHI TIẾT ĐỂ TRA CỨU KHI BẤM "ĐÃ DÙNG"
+    // G3. LƯU CHI TIẾT ĐỂ TRA CỨU SUẤT
     // --------------------------------------------
 
     if (group.hasPositive) {
@@ -604,11 +676,13 @@ function buildReport(
         regionName: group.regionName,
         areaName: group.areaName,
         programName: group.programName,
-        orderCode:
-          cleanText(group.records[0].row.orderCode),
+        orderCode: cleanText(
+          group.records[0].row.orderCode
+        ),
         slotOwner,
-        npps: [...discountsByNpp.values()]
-          .map(item => item.nppName),
+        npps: [...nppDiscounts.values()].map(
+          item => item.name
+        ),
         discount: group.discount
       });
     }
@@ -616,11 +690,11 @@ function buildReport(
 
 
   // ----------------------------------------------
-  // H. HOÀN TẤT KPI VÀ TRẠNG THÁI
+  // H. TỶ LỆ SỬ DỤNG VÀ TRẠNG THÁI
   // ----------------------------------------------
 
-  const summaries: Summary[] =
-    [...summaryMap.values()].map(item => {
+  const summaries = [...summaryMap.values()].map(
+    item => {
       const percent = getPercent(
         item.allocation,
         item.used
@@ -634,7 +708,8 @@ function buildReport(
           item.used
         )
       };
-    });
+    }
+  );
 
 
   return {
@@ -654,13 +729,16 @@ function buildReport(
 // ==================================================
 
 export default function Home() {
-  const [month, setMonth] = useState(currentMonth());
+  const [month, setMonth] = useState(getCurrentMonth());
 
   const [availableMonths, setAvailableMonths] =
     useState<string[]>([]);
 
   const [allocation, setAllocation] =
     useState<Allocation[] | null>(null);
+
+  const [programMap, setProgramMap] =
+    useState<ProgramMapping[] | null>(null);
 
   const [actual, setActual] =
     useState<Actual[] | null>(null);
@@ -669,6 +747,9 @@ export default function Home() {
     useState<Report | null>(null);
 
   const [allocationName, setAllocationName] =
+    useState("");
+
+  const [programMapName, setProgramMapName] =
     useState("");
 
   const [actualName, setActualName] =
@@ -693,6 +774,9 @@ export default function Home() {
 
   const [area, setArea] = useState("ALL");
 
+  const [selectedProgram, setSelectedProgram] =
+    useState("ALL");
+
   const [search, setSearch] = useState("");
 
   const [expandedZones, setExpandedZones] =
@@ -714,6 +798,8 @@ export default function Home() {
       setReport(null);
       setSavedAt("");
       setStatus("");
+      setExpandedZones([]);
+      setSelectedUsedScope(null);
 
       try {
         const [monthsResponse, reportResponse] =
@@ -725,12 +811,17 @@ export default function Home() {
             fetch(
               "/api/save?action=report&month=" +
               encodeURIComponent(month),
-              { cache: "no-store" }
+              {
+                cache: "no-store"
+              }
             )
           ]);
 
-        const monthsData = await monthsResponse.json();
-        const reportData = await reportResponse.json();
+        const monthsData =
+          await monthsResponse.json();
+
+        const reportData =
+          await reportResponse.json();
 
         if (!monthsResponse.ok || !monthsData.ok) {
           throw new Error(
@@ -742,7 +833,7 @@ export default function Home() {
         if (!reportResponse.ok || !reportData.ok) {
           throw new Error(
             reportData.error ||
-            "Không tải được lịch sử tháng."
+            "Không tải được dữ liệu lịch sử."
           );
         }
 
@@ -755,16 +846,20 @@ export default function Home() {
           ]).sort((a, b) => b.localeCompare(a))
         );
 
-        if (reportData.found && reportData.report) {
-          const storedReport = reportData.report as Report;
+        if (
+          reportData.found &&
+          reportData.report
+        ) {
+          const loadedReport =
+            reportData.report as Report;
 
-          // Các tháng được lưu trước khi bổ sung lịch sử
-          // chi tiết đơn hàng có thể chưa có usedOrders.
-          if (!Array.isArray(storedReport.usedOrders)) {
-            storedReport.usedOrders = [];
+          // Dữ liệu lịch sử từ phiên bản cũ
+          // có thể chưa lưu chi tiết đơn hàng.
+          if (!Array.isArray(loadedReport.usedOrders)) {
+            loadedReport.usedOrders = [];
           }
 
-          setReport(storedReport);
+          setReport(loadedReport);
 
           setSavedAt(
             reportData.updatedAt
@@ -775,7 +870,7 @@ export default function Home() {
           );
 
           setStatus(
-            "Đã tải dữ liệu lịch sử tháng " + month + "."
+            "Đã tải dữ liệu tháng " + month + "."
           );
 
           setStatusType("success");
@@ -785,7 +880,7 @@ export default function Home() {
 
           setStatus(
             "Tháng " + month +
-            " chưa có dữ liệu. Hãy mở khu vực tải dữ liệu để upload."
+            " chưa có dữ liệu. Hãy mở khu vực Tải dữ liệu."
           );
 
           setStatusType("info");
@@ -798,7 +893,7 @@ export default function Home() {
 
         setStatus(
           error?.message ||
-          "Không tải được lịch sử."
+          "Không tải được dữ liệu lịch sử."
         );
 
         setStatusType("error");
@@ -819,17 +914,32 @@ export default function Home() {
 
 
   // ----------------------------------------------
-  // BỘ LỌC MIỀN VÀ VÙNG
+  // DANH SÁCH CHƯƠNG TRÌNH, MIỀN, VÙNG
   // ----------------------------------------------
+
+  const programs = useMemo(
+    () =>
+      uniqueInOrder(
+        (report?.summaries || []).map(
+          item => item.programName
+        )
+      ),
+    [report]
+  );
 
   const regions = useMemo(
     () =>
       uniqueInOrder(
-        (report?.summaries || []).map(
-          item => item.regionName
-        )
+        (report?.summaries || [])
+          .filter(
+            item =>
+              selectedProgram === "ALL" ||
+              normalizeKey(item.programName) ===
+                normalizeKey(selectedProgram)
+          )
+          .map(item => item.regionName)
       ),
-    [report]
+    [report, selectedProgram]
   );
 
   const areas = useMemo(
@@ -838,13 +948,22 @@ export default function Home() {
         (report?.summaries || [])
           .filter(
             item =>
-              region === "ALL" ||
-              normalizeKey(item.regionName) === normalizeKey(region)
+              (
+                selectedProgram === "ALL" ||
+                normalizeKey(item.programName) ===
+                  normalizeKey(selectedProgram)
+              ) &&
+              (
+                region === "ALL" ||
+                normalizeKey(item.regionName) ===
+                  normalizeKey(region)
+              )
           )
           .map(item => item.areaName)
       ),
-    [report, region]
+    [report, selectedProgram, region]
   );
+
 
   useEffect(() => {
     if (
@@ -856,6 +975,7 @@ export default function Home() {
       setRegion("ALL");
     }
   }, [regions, region]);
+
 
   useEffect(() => {
     if (
@@ -870,7 +990,7 @@ export default function Home() {
 
 
   // ----------------------------------------------
-  // LỌC BẢNG CHÍNH THEO MIỀN / VÙNG / TỪ KHÓA
+  // DỮ LIỆU CƠ SỞ THEO BỘ LỌC
   // ----------------------------------------------
 
   const baseFiltered = useMemo(
@@ -878,15 +998,22 @@ export default function Home() {
       (report?.summaries || []).filter(
         item =>
           (
+            selectedProgram === "ALL" ||
+            normalizeKey(item.programName) ===
+              normalizeKey(selectedProgram)
+          ) &&
+          (
             region === "ALL" ||
-            normalizeKey(item.regionName) === normalizeKey(region)
+            normalizeKey(item.regionName) ===
+              normalizeKey(region)
           ) &&
           (
             area === "ALL" ||
-            normalizeKey(item.areaName) === normalizeKey(area)
+            normalizeKey(item.areaName) ===
+              normalizeKey(area)
           )
       ),
-    [report, region, area]
+    [report, selectedProgram, region, area]
   );
 
   const baseNpps = useMemo(
@@ -894,30 +1021,48 @@ export default function Home() {
       (report?.npps || []).filter(
         item =>
           (
+            selectedProgram === "ALL" ||
+            normalizeKey(item.programName) ===
+              normalizeKey(selectedProgram)
+          ) &&
+          (
             region === "ALL" ||
-            normalizeKey(item.regionName) === normalizeKey(region)
+            normalizeKey(item.regionName) ===
+              normalizeKey(region)
           ) &&
           (
             area === "ALL" ||
-            normalizeKey(item.areaName) === normalizeKey(area)
+            normalizeKey(item.areaName) ===
+              normalizeKey(area)
           )
       ),
-    [report, region, area]
+    [report, selectedProgram, region, area]
   );
+
+
+  // ----------------------------------------------
+  // TÌM KIẾM THEO MIỀN / VÙNG / NPP / TÊN CT
+  // ----------------------------------------------
 
   const query = normalizeKey(search);
 
-  function matchesSummarySearch(item: Summary): boolean {
+  function matchesContext(item: {
+    regionName: string;
+    areaName: string;
+    programName: string;
+  }): boolean {
     if (!query) return true;
 
     return [
       item.regionName,
       item.areaName,
       item.programName
-    ].some(value =>
-      normalizeKey(value).includes(query)
+    ].some(
+      value =>
+        normalizeKey(value).includes(query)
     );
   }
+
 
   const parentsMatchedByNpp = useMemo(() => {
     const result = new Set<string>();
@@ -939,13 +1084,14 @@ export default function Home() {
     return result;
   }, [baseNpps, query]);
 
+
   const filtered = useMemo(
     () =>
       baseFiltered.filter(item => {
         if (!query) return true;
 
         return (
-          matchesSummarySearch(item) ||
+          matchesContext(item) ||
           parentsMatchedByNpp.has(
             detailKey(
               item.regionName,
@@ -958,6 +1104,7 @@ export default function Home() {
     [baseFiltered, query, parentsMatchedByNpp]
   );
 
+
   const npps = useMemo(
     () =>
       baseNpps.filter(item => {
@@ -965,13 +1112,7 @@ export default function Home() {
 
         return (
           normalizeKey(item.npp).includes(query) ||
-          [
-            item.regionName,
-            item.areaName,
-            item.programName
-          ].some(value =>
-            normalizeKey(value).includes(query)
-          )
+          matchesContext(item)
         );
       }),
     [baseNpps, query]
@@ -979,7 +1120,7 @@ export default function Home() {
 
 
   // ----------------------------------------------
-  // KPI
+  // KPI THEO DỮ LIỆU ĐÃ LỌC
   // ----------------------------------------------
 
   const total = useMemo(
@@ -1010,14 +1151,14 @@ export default function Home() {
   // ----------------------------------------------
 
   const programGroups = useMemo(() => {
-    const groups: Map<string, ProgramGroup> =
+    const map: Map<string, ProgramGroup> =
       new Map();
 
     for (const item of filtered) {
       const key = normalizeKey(item.programName);
 
-      if (!groups.has(key)) {
-        groups.set(key, {
+      if (!map.has(key)) {
+        map.set(key, {
           programName: item.programName,
           rows: [],
           allocation: 0,
@@ -1028,7 +1169,7 @@ export default function Home() {
         });
       }
 
-      const group = groups.get(key)!;
+      const group = map.get(key)!;
 
       group.rows.push(item);
       group.allocation += item.allocation;
@@ -1036,7 +1177,7 @@ export default function Home() {
       group.discount += item.discount;
     }
 
-    return [...groups.values()].map(group => {
+    return [...map.values()].map(group => {
       const percent = getPercent(
         group.allocation,
         group.used
@@ -1055,13 +1196,17 @@ export default function Home() {
 
 
   // ----------------------------------------------
-  // CÁC ĐƠN HÀNG DÙNG CHO CỬA SỔ TRA CỨU
+  // TRA CỨU CÁC SUẤT ĐÃ DÙNG
   // ----------------------------------------------
 
   const activeUsedOrders = useMemo(() => {
-    if (!report || !selectedUsedScope) return [];
+    if (!report || !selectedUsedScope) {
+      return [];
+    }
 
-    return (report.usedOrders || []).filter(item => {
+    const allOrders = report.usedOrders || [];
+
+    return allOrders.filter(item => {
       if (
         normalizeKey(item.programName) !==
         normalizeKey(selectedUsedScope.programName)
@@ -1072,7 +1217,7 @@ export default function Home() {
       if (
         selectedUsedScope.regionName &&
         normalizeKey(item.regionName) !==
-        normalizeKey(selectedUsedScope.regionName)
+          normalizeKey(selectedUsedScope.regionName)
       ) {
         return false;
       }
@@ -1080,7 +1225,7 @@ export default function Home() {
       if (
         selectedUsedScope.areaName &&
         normalizeKey(item.areaName) !==
-        normalizeKey(selectedUsedScope.areaName)
+          normalizeKey(selectedUsedScope.areaName)
       ) {
         return false;
       }
@@ -1100,7 +1245,7 @@ export default function Home() {
       }
 
       if (query) {
-        const searchFields = [
+        const fields = [
           item.regionName,
           item.areaName,
           item.programName,
@@ -1110,8 +1255,9 @@ export default function Home() {
         ];
 
         if (
-          !searchFields.some(value =>
-            normalizeKey(value).includes(query)
+          !fields.some(
+            value =>
+              normalizeKey(value).includes(query)
           )
         ) {
           return false;
@@ -1151,34 +1297,30 @@ export default function Home() {
           return false;
         }
 
-        if (!query) return true;
+        if (query) {
+          const fields = [
+            item.regionName,
+            item.areaName,
+            item.programName,
+            item.npp,
+            item.orderCode,
+            item.reason
+          ];
 
-        return [
-          item.regionName,
-          item.areaName,
-          item.programName,
-          item.npp,
-          item.orderCode,
-          item.reason
-        ].some(value =>
-          normalizeKey(value).includes(query)
-        );
+          if (
+            !fields.some(
+              value =>
+                normalizeKey(value).includes(query)
+            )
+          ) {
+            return false;
+          }
+        }
+
+        return true;
       }),
     [report, region, area, query]
   );
-
-
-  // ----------------------------------------------
-  // MỞ CHI TIẾT SUẤT ĐÃ DÙNG
-  // ----------------------------------------------
-
-  function openUsedDetails(scope: UsedScope) {
-    setSelectedUsedScope(scope);
-  }
-
-  function closeUsedDetails() {
-    setSelectedUsedScope(null);
-  }
 
 
   // ----------------------------------------------
@@ -1188,28 +1330,32 @@ export default function Home() {
   function changeMonth(value: string) {
     if (!value || value === month) return;
 
+    // Không giữ các file tháng trước để tránh
+    // vô tình ghi nhầm sang tháng mới.
     setAllocation(null);
+    setProgramMap(null);
     setActual(null);
 
     setAllocationName("");
+    setProgramMapName("");
     setActualName("");
 
     setExpandedZones([]);
     setSelectedUsedScope(null);
 
-    setStatus("");
     setSavedAt("");
+    setStatus("");
 
     setMonth(value);
   }
 
 
   // ----------------------------------------------
-  // UPLOAD FILE
+  // UPLOAD MỘT FILE
   // ----------------------------------------------
 
   async function loadFile(
-    type: "allocation" | "actual",
+    type: "allocation" | "programMap" | "actual",
     file?: File
   ): Promise<void> {
     if (!file) return;
@@ -1228,6 +1374,17 @@ export default function Home() {
         setStatus(
           `Đã đọc ${data.length} dòng phân bổ.`
         );
+
+      } else if (type === "programMap") {
+        const data = await parseProgramMapping(file);
+
+        setProgramMap(data);
+        setProgramMapName(file.name);
+
+        setStatus(
+          `Đã đọc ${data.length} dòng quy ước Tên CT.`
+        );
+
       } else {
         const data = await parseActual(file);
 
@@ -1235,16 +1392,18 @@ export default function Home() {
         setActualName(file.name);
 
         setStatus(
-          "Đã đọc dữ liệu file 5.1 từ các cột E, G, N, W, AK."
+          "Đã đọc file 5.1 từ các cột E, G, N, W, AK."
         );
       }
 
+      // Sau khi đổi một nguồn dữ liệu, phải xử lý lại.
       setReport(null);
       setStatusType("success");
 
     } catch (error: any) {
       setStatus(
-        error?.message || "Không đọc được file."
+        error?.message ||
+        "Không đọc được file."
       );
 
       setStatusType("error");
@@ -1256,13 +1415,13 @@ export default function Home() {
 
 
   // ----------------------------------------------
-  // LƯU DỮ LIỆU THÁNG
+  // LƯU DỮ LIỆU CỦA THÁNG
   // ----------------------------------------------
 
   async function processData(): Promise<void> {
-    if (!allocation || !actual) {
+    if (!allocation || !programMap || !actual) {
       setStatus(
-        "Vui lòng upload đủ file phân bổ và file 5.1."
+        "Vui lòng upload đủ 3 file: Phân bổ, Tên CT và 5.1."
       );
 
       setStatusType("error");
@@ -1276,11 +1435,14 @@ export default function Home() {
     try {
       const result = buildReport(
         allocation,
+        programMap,
         actual
       );
 
+      // Hiển thị kết quả đã tính.
       setReport(result);
 
+      // Gửi dữ liệu đến API để lưu lịch sử tháng.
       const response = await fetch(
         "/api/save",
         {
@@ -1291,12 +1453,14 @@ export default function Home() {
           body: JSON.stringify({
             month,
             allocation,
+            programMap,
             report: result
           })
         }
       );
 
-      const serverResult = await response.json();
+      const serverResult =
+        await response.json();
 
       if (!response.ok || !serverResult.ok) {
         throw new Error(
@@ -1323,7 +1487,7 @@ export default function Home() {
       setStatus(
         "Đã xử lý và lưu dữ liệu tháng " +
         month +
-        "."
+        ". Các tháng khác được giữ nguyên."
       );
 
       setStatusType("success");
@@ -1343,10 +1507,31 @@ export default function Home() {
 
 
   // ----------------------------------------------
+  // MỞ / ĐÓNG CHI TIẾT
+  // ----------------------------------------------
+
+  function toggleZone(key: string) {
+    setExpandedZones(previous =>
+      previous.includes(key)
+        ? previous.filter(item => item !== key)
+        : [...previous, key]
+    );
+  }
+
+  function openUsedDetails(scope: UsedScope) {
+    setSelectedUsedScope(scope);
+  }
+
+  function closeUsedDetails() {
+    setSelectedUsedScope(null);
+  }
+
+
+  // ----------------------------------------------
   // XUẤT EXCEL THEO BỘ LỌC
   // ----------------------------------------------
 
-  function exportExcel(): void {
+  function exportExcel() {
     if (!report) return;
 
     const workbook = XLSX.utils.book_new();
@@ -1363,30 +1548,30 @@ export default function Home() {
       "Trạng thái"
     ]];
 
-    for (const item of programGroups) {
+    for (const group of programGroups) {
       trackingRows.push([
         "Tổng chương trình",
         "",
         "",
-        item.programName,
-        item.allocation,
-        item.used,
-        item.percent,
-        item.discount,
-        item.status
+        group.programName,
+        group.allocation,
+        group.used,
+        group.percent,
+        group.discount,
+        group.status
       ]);
 
-      for (const row of item.rows) {
+      for (const item of group.rows) {
         trackingRows.push([
           "Chi tiết vùng",
-          row.regionName,
-          row.areaName,
-          row.programName,
-          row.allocation,
-          row.used,
-          row.percent,
-          row.discount,
-          row.status
+          item.regionName,
+          item.areaName,
+          item.programName,
+          item.allocation,
+          item.used,
+          item.percent,
+          item.discount,
+          item.status
         ]);
       }
     }
@@ -1431,11 +1616,11 @@ export default function Home() {
       "Tên CT",
       "Mã đơn hàng",
       "NPP nhận suất",
-      "Danh sách NPP trên đơn",
+      "Danh sách NPP",
       "Tổng chiết khấu"
     ]];
 
-    for (const item of (report.usedOrders || [])) {
+    for (const item of report.usedOrders || []) {
       usedRows.push([
         item.regionName,
         item.areaName,
@@ -1491,10 +1676,11 @@ export default function Home() {
 
 
   // ----------------------------------------------
-  // XÓA BỘ LỌC
+  // ĐẶT LẠI BỘ LỌC
   // ----------------------------------------------
 
   function resetFilters() {
+    setSelectedProgram("ALL");
     setRegion("ALL");
     setArea("ALL");
     setSearch("");
@@ -1519,8 +1705,8 @@ export default function Home() {
           </h1>
 
           <p className="headerDescription">
-            Theo dõi tiến độ sử dụng suất và chiết khấu
-            theo chương trình, vùng và NPP.
+            Theo dõi suất phân bổ, tiến độ sử dụng,
+            tiền chiết khấu và NPP.
           </p>
 
           <div className="headerMeta">
@@ -1538,7 +1724,7 @@ export default function Home() {
       </header>
 
 
-      {/* UPLOAD CÓ THỂ THU GỌN */}
+      {/* UPLOAD BA FILE */}
 
       <section className="panel uploadPanel">
         <button
@@ -1551,6 +1737,7 @@ export default function Home() {
             <span className="collapseArrow">
               {uploadOpen ? "▾" : "▸"}
             </span>
+
             Tải dữ liệu
           </span>
 
@@ -1562,6 +1749,7 @@ export default function Home() {
 
         {uploadOpen && (
           <div className="uploadContent">
+
             <div className="uploadMonth">
               <label htmlFor="uploadMonth">
                 Tháng dữ liệu
@@ -1578,18 +1766,20 @@ export default function Home() {
               />
 
               <p className="muted">
-                Upload lại sẽ thay dữ liệu tháng đang chọn.
+                Upload lại sẽ thay dữ liệu của tháng đang chọn.
                 Các tháng khác được giữ nguyên.
               </p>
             </div>
 
 
             <div className="uploadgrid">
+
               <div className="uploadbox">
-                <h3>File phân bổ</h3>
+                <h3>1. File phân bổ</h3>
 
                 <p className="muted">
-                  6 cột theo bố cục đã thống nhất.
+                  5 cột: Tên Miền, Tên vùng, Tên CT,
+                  Cơ cấu CT, Suất phân bổ.
                 </p>
 
                 <input
@@ -1615,10 +1805,40 @@ export default function Home() {
 
 
               <div className="uploadbox">
-                <h3>File 5.1</h3>
+                <h3>2. File Tên CT</h3>
 
                 <p className="muted">
-                  Chỉ đọc E, G, N, W, AK.
+                  2 cột: Mã CT, Tên CT.
+                  Một tên có thể chứa nhiều mã CT khác nhau.
+                </p>
+
+                <input
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  disabled={busy}
+                  onChange={event => {
+                    const file = event.currentTarget.files?.[0];
+                    event.currentTarget.value = "";
+
+                    if (file) {
+                      void loadFile("programMap", file);
+                    }
+                  }}
+                />
+
+                {programMapName && (
+                  <p className="selectedFile">
+                    Đã chọn: {programMapName}
+                  </p>
+                )}
+              </div>
+
+
+              <div className="uploadbox">
+                <h3>3. File 5.1</h3>
+
+                <p className="muted">
+                  Chỉ đọc các cột E, G, N, W và AK.
                 </p>
 
                 <input
@@ -1641,6 +1861,7 @@ export default function Home() {
                   </p>
                 )}
               </div>
+
             </div>
 
 
@@ -1648,7 +1869,12 @@ export default function Home() {
               <button
                 type="button"
                 className="btn"
-                disabled={busy || !allocation || !actual}
+                disabled={
+                  busy ||
+                  !allocation ||
+                  !programMap ||
+                  !actual
+                }
                 onClick={processData}
               >
                 {busy
@@ -1664,20 +1890,32 @@ export default function Home() {
               </div>
             )}
 
+
             <div className="notice">
-              <strong>Quy tắc:</strong>
+              <strong>Quy tắc xử lý:</strong>
+
               <ul>
                 <li>
-                  Giao diện chỉ hiển thị Tên CT.
-                  Mã CT được dùng nội bộ để mapping.
+                  Mã CT ở cột N được lấy phần đầu trước dấu phẩy.
+                  Mã đó được tra cứu trong file Tên CT.
                 </li>
+
                 <li>
-                  Một Tên CT + Vùng + Mã đơn hàng
-                  chỉ tính tối đa một suất nếu có AK &gt; 0.
+                  Các mã CT cùng Tên CT được tổng hợp chung.
                 </li>
+
                 <li>
-                  Bấm số suất đã dùng để tra cứu đơn hàng
-                  và NPP tạo ra các suất đó.
+                  Một Tên CT + Vùng + Mã đơn hàng chỉ tính
+                  tối đa một suất nếu có ít nhất một dòng AK &gt; 0.
+                </li>
+
+                <li>
+                  Tổng tiền chiết khấu cộng tất cả các dòng AK hợp lệ.
+                </li>
+
+                <li>
+                  Dữ liệu không có mapping hoặc không có phân bổ
+                  được đưa vào cảnh báo, không cộng KPI.
                 </li>
               </ul>
             </div>
@@ -1690,6 +1928,7 @@ export default function Home() {
 
       <section className="panel filterPanel">
         <div className="filterBar">
+
           <label className="filterField">
             <span>Tháng</span>
 
@@ -1753,7 +1992,7 @@ export default function Home() {
               onChange={event =>
                 setSearch(event.target.value)
               }
-              placeholder="Miền, vùng, NPP, tên CT..."
+              placeholder="Miền, vùng, NPP, Tên CT..."
             />
           </label>
 
@@ -1766,6 +2005,7 @@ export default function Home() {
           >
             ↓ Xuất Excel
           </button>
+
         </div>
 
 
@@ -1805,10 +2045,71 @@ export default function Home() {
       </section>
 
 
+      {/* TAB TÊN CT */}
+
+      {report && (
+        <section className="panel programPanel">
+          <div className="sectionHeadingRow">
+            <div>
+              <h2 className="sectionTitle">
+                Danh mục chương trình
+              </h2>
+
+              <p className="muted">
+                Các mã CT đã được quy về Tên CT.
+                Dashboard không hiển thị mã CT.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={resetFilters}
+            >
+              Xóa bộ lọc
+            </button>
+          </div>
+
+
+          <div className="programTabs">
+            <button
+              type="button"
+              className={
+                selectedProgram === "ALL"
+                  ? "programTab active"
+                  : "programTab"
+              }
+              onClick={() => setSelectedProgram("ALL")}
+            >
+              Tất cả
+            </button>
+
+            {programs.map(item => (
+              <button
+                type="button"
+                key={item}
+                className={
+                  normalizeKey(selectedProgram) ===
+                  normalizeKey(item)
+                    ? "programTab active"
+                    : "programTab"
+                }
+                onClick={() => setSelectedProgram(item)}
+                title={item}
+              >
+                {item}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+
       {/* KPI */}
 
       {report && (
         <section className="kpiGrid">
+
           <div className="metric">
             <div className="metricLabel">
               Tổng suất phân bổ
@@ -1834,7 +2135,7 @@ export default function Home() {
             </div>
 
             <div className="metricHint">
-              Bấm số đã dùng trong bảng để xem chi tiết
+              Bấm số trong bảng để tra cứu đơn hàng
             </div>
           </div>
 
@@ -1861,9 +2162,9 @@ export default function Home() {
                   )
                 }
                 style={{
-                  width: `${Math.max(
-                    0,
-                    Math.min(100, totalPercent)
+                  width: `${Math.min(
+                    100,
+                    Math.max(0, totalPercent)
                   )}%`
                 }}
               />
@@ -1885,17 +2186,19 @@ export default function Home() {
             </div>
 
             <div className="metricHint">
-              Tổng AK theo bộ lọc
+              Tổng AK thuộc dữ liệu hợp lệ
             </div>
           </div>
+
         </section>
       )}
 
 
-      {/* BẢNG TRACKING: TỔNG CHƯƠNG TRÌNH + VÙNG */}
+      {/* BẢNG TRACKING */}
 
       {report && (
         <section className="panel trackingPanel">
+
           <div className="sectionHeadingRow">
             <div>
               <h2 className="sectionTitle">
@@ -1903,9 +2206,8 @@ export default function Home() {
               </h2>
 
               <p className="muted">
-                Không hiển thị mã CT. Các mã CT có cùng
-                Tên CT được gộp lại.
-                Bấm số đã dùng để xem các đơn hàng tương ứng.
+                Dòng đậm là tổng Tên CT; dòng dưới là từng vùng.
+                Bấm số đã dùng để tra cứu đơn hàng và NPP.
               </p>
             </div>
 
@@ -1917,6 +2219,7 @@ export default function Home() {
 
           <div className="tablewrap">
             <table className="trackingTable">
+
               <thead>
                 <tr>
                   <th>Miền</th>
@@ -1932,53 +2235,47 @@ export default function Home() {
 
 
               <tbody>
-                {programGroups.map(group => {
-                  const groupPercent = group.percent;
+                {programGroups.map(group => (
+                  <FragmentProgramGroup
+                    key={normalizeKey(group.programName)}
+                    group={group}
+                    expandedZones={expandedZones}
+                    toggleZone={toggleZone}
+                    fmt={fmt}
+                    money={money}
 
-                  return (
-                    <FragmentProgramGroup
-                      key={normalizeKey(group.programName)}
-                      group={group}
-                      expandedZones={expandedZones}
-                      toggleZone={(key: string) => {
-                        setExpandedZones(previous =>
-                          previous.includes(key)
-                            ? previous.filter(item => item !== key)
-                            : [...previous, key]
-                        );
-                      }}
-                      getNppsForZone={(item: Summary) => {
-                        const key = detailKey(
-                          item.regionName,
-                          item.areaName,
-                          item.programName
-                        );
+                    onClickProgramUsed={() => {
+                      openUsedDetails({
+                        programName: group.programName
+                      });
+                    }}
 
-                        return npps.filter(npp =>
+                    onClickZoneUsed={(item: Summary) => {
+                      openUsedDetails({
+                        programName: item.programName,
+                        regionName: item.regionName,
+                        areaName: item.areaName
+                      });
+                    }}
+
+                    getNppsForZone={(item: Summary) => {
+                      const key = detailKey(
+                        item.regionName,
+                        item.areaName,
+                        item.programName
+                      );
+
+                      return npps.filter(
+                        npp =>
                           detailKey(
                             npp.regionName,
                             npp.areaName,
                             npp.programName
                           ) === key
-                        );
-                      }}
-                      fmt={fmt}
-                      money={money}
-                      onClickProgramUsed={() => {
-                        openUsedDetails({
-                          programName: group.programName
-                        });
-                      }}
-                      onClickZoneUsed={(item: Summary) => {
-                        openUsedDetails({
-                          programName: item.programName,
-                          regionName: item.regionName,
-                          areaName: item.areaName
-                        });
-                      }}
-                    />
-                  );
-                })}
+                      );
+                    }}
+                  />
+                ))}
 
 
                 {programGroups.length === 0 && (
@@ -1995,7 +2292,7 @@ export default function Home() {
                 <tfoot>
                   <tr>
                     <td colSpan={3}>
-                      Tổng cộng theo bộ lọc
+                      Tổng cộng
                     </td>
 
                     <td className="num">
@@ -2003,21 +2300,13 @@ export default function Home() {
                     </td>
 
                     <td className="num">
-                      <button
-                        type="button"
-                        className="usedNumberButton"
-                        onClick={() =>
-                          setSelectedUsedScope(null)
-                        }
-                        disabled
-                        title="Tổng cộng được thể hiện ở KPI phía trên"
-                      >
-                        {fmt(total.used)}
-                      </button>
+                      {fmt(total.used)}
                     </td>
 
                     <td>
-                      <strong>{fmt(totalPercent)}%</strong>
+                      <strong>
+                        {fmt(totalPercent)}%
+                      </strong>
                     </td>
 
                     <td className="num">
@@ -2045,6 +2334,7 @@ export default function Home() {
                   </tr>
                 </tfoot>
               )}
+
             </table>
           </div>
         </section>
@@ -2055,6 +2345,7 @@ export default function Home() {
 
       {report && (
         <section className="panel">
+
           <div className="sectionHeadingRow">
             <div>
               <h2 className="sectionTitle">
@@ -2062,8 +2353,8 @@ export default function Home() {
               </h2>
 
               <p className="muted">
-                Các trường hợp không có phân bổ hoặc thiếu
-                mã đơn hàng được hiển thị riêng.
+                Bao gồm mã CT chưa có trong file Tên CT,
+                vùng không có phân bổ và đơn hàng thiếu mã.
               </p>
             </div>
 
@@ -2102,6 +2393,7 @@ export default function Home() {
                     </td>
 
                     <td>{item.areaName}</td>
+
                     <td>{item.programName}</td>
 
                     <td>
@@ -2141,7 +2433,7 @@ export default function Home() {
           className="modalBackdrop"
           onMouseDown={event => {
             if (event.target === event.currentTarget) {
-              closeUsedDetails();
+              setSelectedUsedScope(null);
             }
           }}
         >
@@ -2151,11 +2443,12 @@ export default function Home() {
             aria-modal="true"
             aria-labelledby="usedModalTitle"
           >
+
             <div className="usedModalHeader">
               <div>
                 <h2
-                  id="usedModalTitle"
                   className="sectionTitle"
+                  id="usedModalTitle"
                 >
                   Chi tiết suất đã dùng
                 </h2>
@@ -2182,7 +2475,8 @@ export default function Home() {
 
             <div className="usedModalSummary">
               <div>
-                <span>Số đơn hàng được tính suất</span>
+                <span>Số đơn hàng đã dùng suất</span>
+
                 <strong>
                   {activeUsedOrders.length}
                 </strong>
@@ -2190,6 +2484,7 @@ export default function Home() {
 
               <div>
                 <span>Tổng chiết khấu các đơn hàng</span>
+
                 <strong>
                   {money(
                     activeUsedOrders.reduce(
@@ -2203,11 +2498,10 @@ export default function Home() {
 
 
             <p className="muted modalExplanation">
-              Mỗi dòng bên dưới tương ứng một đơn hàng
-              được tính một suất. “NPP nhận suất” là NPP
-              được gán suất nếu đơn hàng có nhiều NPP.
-              Tổng chiết khấu được cộng tất cả dòng AK
-              thuộc đơn hàng.
+              Mỗi dòng là một mã đơn hàng được tính một suất.
+              Khi một đơn có nhiều NPP, cột NPP nhận suất
+              cho biết đơn vị được gán suất; tổng chiết khấu
+              vẫn cộng theo toàn bộ dòng AK của đơn hàng.
             </p>
 
 
@@ -2238,7 +2532,9 @@ export default function Home() {
                       <td>{item.areaName}</td>
                       <td>{item.orderCode}</td>
                       <td>{item.slotOwner}</td>
-                      <td>{(item.npps || []).join(", ")}</td>
+                      <td>
+                        {(item.npps || []).join(", ")}
+                      </td>
                       <td className="num">
                         {money(item.discount)}
                       </td>
@@ -2249,9 +2545,9 @@ export default function Home() {
                     <tr>
                       <td colSpan={6} className="noData">
                         Không tìm thấy chi tiết đơn hàng.
-                        Nếu đây là dữ liệu lịch sử được lưu
-                        trước khi bổ sung chức năng tra cứu,
-                        hãy upload lại tháng đó để lưu chi tiết.
+                        Nếu tháng này được lưu trước khi có
+                        chức năng tra cứu, hãy upload lại
+                        dữ liệu tháng đó để lưu chi tiết.
                       </td>
                     </tr>
                   )}
@@ -2274,6 +2570,8 @@ export default function Home() {
       )}
 
 
+      {/* CHƯA CÓ DỮ LIỆU */}
+
       {!report && !historyLoading && (
         <section className="panel emptyState">
           <h2>
@@ -2281,8 +2579,7 @@ export default function Home() {
           </h2>
 
           <p className="muted">
-            Mở khu vực Tải dữ liệu, upload hai file và
-            nhấn Kiểm tra và lưu dữ liệu.
+            Mở khu vực Tải dữ liệu và upload đủ ba file.
           </p>
         </section>
       )}
@@ -2290,8 +2587,8 @@ export default function Home() {
 
       <footer className="footer">
         Dashboard theo dõi phân bổ CTKM / CTTL.
-        Vui lòng kiểm tra cảnh báo và đối chiếu dữ liệu
-        với file hệ thống trước khi sử dụng báo cáo chính thức.
+        Kiểm tra cảnh báo và đối chiếu số liệu trước khi
+        sử dụng làm báo cáo chính thức.
       </footer>
 
     </main>
@@ -2300,22 +2597,22 @@ export default function Home() {
 
 
 // ==================================================
-// DÒNG TỔNG CHƯƠNG TRÌNH VÀ CHI TIẾT VÙNG
+// DÒNG TỔNG CHƯƠNG TRÌNH
 // ==================================================
 
 function FragmentProgramGroup(props: {
   group: ProgramGroup;
   expandedZones: string[];
   toggleZone: (key: string) => void;
-  getNppsForZone: (item: Summary) => NppSummary[];
   fmt: (value: number) => string;
   money: (value: number) => string;
   onClickProgramUsed: () => void;
   onClickZoneUsed: (item: Summary) => void;
+  getNppsForZone: (item: Summary) => NppSummary[];
 }) {
   const group = props.group;
 
-  const groupPercent = Math.max(
+  const groupWidth = Math.max(
     0,
     Math.min(100, group.percent)
   );
@@ -2342,8 +2639,8 @@ function FragmentProgramGroup(props: {
             type="button"
             className="usedNumberButton"
             onClick={props.onClickProgramUsed}
-            title="Bấm để tra cứu các đơn hàng đã dùng suất"
             disabled={group.used === 0}
+            title="Bấm để tra cứu các đơn hàng đã dùng suất"
           >
             {props.fmt(group.used)}
           </button>
@@ -2366,7 +2663,9 @@ function FragmentProgramGroup(props: {
                     : ""
                 )
               }
-              style={{ width: `${groupPercent}%` }}
+              style={{
+                width: `${groupWidth}%`
+              }}
             />
           </div>
         </td>
@@ -2400,24 +2699,18 @@ function FragmentProgramGroup(props: {
 
         const npps = props.getNppsForZone(item);
 
-        const percentWidth = Math.max(
-          0,
-          Math.min(100, item.percent)
-        );
-
         return (
           <FragmentZoneRow
             key={key + index}
             item={item}
             expanded={expanded}
             npps={npps}
-            percentWidth={percentWidth}
             toggle={() => props.toggleZone(key)}
-            fmt={props.fmt}
-            money={props.money}
             onClickUsed={() =>
               props.onClickZoneUsed(item)
             }
+            fmt={props.fmt}
+            money={props.money}
           />
         );
       })}
@@ -2434,13 +2727,17 @@ function FragmentZoneRow(props: {
   item: Summary;
   expanded: boolean;
   npps: NppSummary[];
-  percentWidth: number;
   toggle: () => void;
+  onClickUsed: () => void;
   fmt: (value: number) => string;
   money: (value: number) => string;
-  onClickUsed: () => void;
 }) {
   const item = props.item;
+
+  const percentWidth = Math.max(
+    0,
+    Math.min(100, item.percent)
+  );
 
   return (
     <>
@@ -2473,8 +2770,8 @@ function FragmentZoneRow(props: {
             type="button"
             className="usedNumberButton"
             onClick={props.onClickUsed}
-            title="Bấm để xem đơn hàng và NPP tạo ra các suất đã dùng"
             disabled={item.used === 0}
+            title="Bấm để xem các đơn hàng và NPP tạo ra suất"
           >
             {props.fmt(item.used)}
           </button>
@@ -2497,7 +2794,9 @@ function FragmentZoneRow(props: {
                     : ""
                 )
               }
-              style={{ width: `${props.percentWidth}%` }}
+              style={{
+                width: `${percentWidth}%`
+              }}
             />
           </div>
         </td>
@@ -2532,8 +2831,12 @@ function FragmentZoneRow(props: {
                   <thead>
                     <tr>
                       <th>Tên NPP</th>
-                      <th className="num">Suất đã dùng</th>
-                      <th className="num">Tổng chiết khấu</th>
+                      <th className="num">
+                        Suất đã dùng
+                      </th>
+                      <th className="num">
+                        Tổng chiết khấu
+                      </th>
                     </tr>
                   </thead>
 
