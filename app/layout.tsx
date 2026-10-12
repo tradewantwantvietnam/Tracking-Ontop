@@ -1,4 +1,5 @@
 import "./globals.css";
+import GzipUpload from "./GzipUpload";
 
 export const metadata = {
   title: "Theo dõi phân bổ chương trình",
@@ -13,7 +14,10 @@ export default function RootLayout({
 }) {
   return (
     <html lang="vi">
-      <body>{children}</body>
+      <body>
+        <GzipUpload />
+        {children}
+      </body>
     </html>
   );
 }
