@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 
 // ==================================================
@@ -211,6 +212,9 @@ export async function GET(request: Request) {
 
 // ==================================================
 // POST: LƯU DỮ LIỆU MỘT THÁNG
+//
+// Dạng mới: dữ liệu nén gzip + base64 (một request).
+// Dạng cũ:  JSON thường (vẫn được hỗ trợ).
 // ==================================================
 
 export async function POST(request: Request) {
@@ -234,7 +238,47 @@ export async function POST(request: Request) {
     }
 
 
-    // Bắt buộc có đủ phân bổ, mapping và báo cáo.
+    // ----------------------------------------------
+    // DẠNG MỚI: DỮ LIỆU NÉN GZIP
+    // ----------------------------------------------
+
+    if (payload.encoding === "gzip-base64") {
+      if (
+        typeof payload.data !== "string" ||
+        payload.data.length === 0
+      ) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "Không nhận được dữ liệu nén."
+          },
+          { status: 400 }
+        );
+      }
+
+      const result = await callAppsScript(
+        {},
+        {
+          action: "saveReportGz",
+          month,
+          data: payload.data
+        }
+      );
+
+      return NextResponse.json({
+        ok: true,
+        month: result.month,
+        updatedAt: result.updatedAt,
+        months: result.months,
+        counts: result.counts
+      });
+    }
+
+
+    // ----------------------------------------------
+    // DẠNG CŨ: JSON THƯỜNG
+    // ----------------------------------------------
+
     if (
       !Array.isArray(payload.allocation) ||
       !Array.isArray(payload.programMap) ||
@@ -254,9 +298,6 @@ export async function POST(request: Request) {
       );
     }
 
-
-    // Không gửi toàn bộ 41 cột của file 5.1.
-    // Chỉ gửi kết quả đã xử lý và ba nguồn dữ liệu cần lưu.
     const result = await callAppsScript(
       {},
       {
@@ -267,7 +308,6 @@ export async function POST(request: Request) {
         report: payload.report
       }
     );
-
 
     return NextResponse.json({
       ok: true,
