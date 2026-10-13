@@ -42,16 +42,6 @@ type NppSummary = {
   discount: number;
 };
 
-type Warning = {
-  regionName: string;
-  areaName: string;
-  programName: string;
-  npp: string;
-  orderCode: string;
-  discount: number;
-  reason: string;
-};
-
 type UsedOrder = {
   regionName: string;
   areaName: string;
@@ -62,10 +52,12 @@ type UsedOrder = {
   discount: number;
 };
 
+// Mảng warnings luôn rỗng. Giữ lại chỉ để khớp
+// cấu trúc dữ liệu mà máy chủ yêu cầu.
 type Report = {
   summaries: Summary[];
   npps: NppSummary[];
-  warnings: Warning[];
+  warnings: unknown[];
   usedOrders: UsedOrder[];
 };
 
@@ -284,9 +276,6 @@ function buildReport(
     );
 
     if (allocationByAreaAndProgram.has(key)) {
-      const existing =
-        allocationByAreaAndProgram.get(key)!;
-
       throw new Error(
         "Tên vùng + Tên CT bị trùng hoặc không xác định được miền: " +
         item.areaName +
@@ -395,20 +384,10 @@ function buildReport(
 
 
   // ----------------------------------------------
-  // E. CẢNH BÁO
-  // ----------------------------------------------
-
-  const unmatchedWarnings: Map<string, Warning> =
-    new Map();
-
-  const missingOrderWarnings: Warning[] = [];
-
-
-  // ----------------------------------------------
   // F. ĐỌC TỪNG DÒNG FILE 5.1
   // ----------------------------------------------
 
-  actuals.forEach((row, rowIndex) => {
+  actuals.forEach(row => {
     const programCode = normalizeKey(row.programCode);
 
     // Tìm Tên CT từ file quy ước.
@@ -417,40 +396,19 @@ function buildReport(
 
     // --------------------------------------------
     // F1. MÃ CT CHƯA CÓ TRONG FILE TÊN CT
+    //
+    // Bỏ qua dòng này, không cộng vào KPI.
     // --------------------------------------------
 
     if (!programName) {
-      const orderCode = cleanText(row.orderCode);
-
-      const warningKey = [
-        "UNKNOWN_PROGRAM",
-        normalizeKey(row.areaName),
-        programCode,
-        normalizeKey(orderCode || String(rowIndex))
-      ].join("|||");
-
-      if (!unmatchedWarnings.has(warningKey)) {
-        unmatchedWarnings.set(warningKey, {
-          regionName: "",
-          areaName: row.areaName,
-          programName: "Chưa xác định",
-          npp: row.npp,
-          orderCode,
-          discount: 0,
-          reason:
-            "Mã CT chưa được khai báo trong file Tên CT."
-        });
-      }
-
-      unmatchedWarnings.get(warningKey)!.discount +=
-        Number(row.discount) || 0;
-
       return;
     }
 
 
     // --------------------------------------------
     // F2. TÊN VÙNG + TÊN CT KHÔNG CÓ PHÂN BỔ
+    //
+    // Bỏ qua dòng này, không cộng vào KPI.
     // --------------------------------------------
 
     const allocation =
@@ -459,31 +417,6 @@ function buildReport(
       );
 
     if (!allocation) {
-      const orderCode = cleanText(row.orderCode);
-
-      const warningKey = [
-        "NO_ALLOCATION",
-        normalizeKey(row.areaName),
-        normalizeKey(programName),
-        normalizeKey(orderCode || String(rowIndex))
-      ].join("|||");
-
-      if (!unmatchedWarnings.has(warningKey)) {
-        unmatchedWarnings.set(warningKey, {
-          regionName: "",
-          areaName: row.areaName,
-          programName,
-          npp: row.npp,
-          orderCode,
-          discount: 0,
-          reason:
-            "Không có cặp Tên vùng + Tên CT trong file phân bổ."
-        });
-      }
-
-      unmatchedWarnings.get(warningKey)!.discount +=
-        Number(row.discount) || 0;
-
       return;
     }
 
@@ -516,18 +449,6 @@ function buildReport(
         discount,
         0
       );
-
-      missingOrderWarnings.push({
-        regionName: allocation.regionName,
-        areaName: allocation.areaName,
-        programName,
-        npp: row.npp,
-        orderCode: "",
-        discount,
-        reason:
-          "Thiếu mã đơn hàng. Tiền AK vẫn được cộng; " +
-          "không tính suất để tránh đếm trùng sai."
-      });
 
       return;
     }
@@ -715,10 +636,7 @@ function buildReport(
   return {
     summaries,
     npps: [...nppMap.values()],
-    warnings: [
-      ...unmatchedWarnings.values(),
-      ...missingOrderWarnings
-    ],
+    warnings: [],
     usedOrders
   };
 }
@@ -1276,54 +1194,6 @@ export default function Home() {
 
 
   // ----------------------------------------------
-  // CẢNH BÁO
-  // ----------------------------------------------
-
-  const warnings = useMemo(
-    () =>
-      (report?.warnings || []).filter(item => {
-        if (
-          region !== "ALL" &&
-          item.regionName &&
-          normalizeKey(item.regionName) !== normalizeKey(region)
-        ) {
-          return false;
-        }
-
-        if (
-          area !== "ALL" &&
-          normalizeKey(item.areaName) !== normalizeKey(area)
-        ) {
-          return false;
-        }
-
-        if (query) {
-          const fields = [
-            item.regionName,
-            item.areaName,
-            item.programName,
-            item.npp,
-            item.orderCode,
-            item.reason
-          ];
-
-          if (
-            !fields.some(
-              value =>
-                normalizeKey(value).includes(query)
-            )
-          ) {
-            return false;
-          }
-        }
-
-        return true;
-      }),
-    [report, region, area, query]
-  );
-
-
-  // ----------------------------------------------
   // THAY THÁNG
   // ----------------------------------------------
 
@@ -1639,35 +1509,6 @@ export default function Home() {
     );
 
 
-    const warningRows: unknown[][] = [[
-      "Tên Miền",
-      "Tên vùng",
-      "Tên CT",
-      "Tên NPP",
-      "Mã đơn hàng",
-      "Tổng AK",
-      "Lý do"
-    ]];
-
-    for (const item of warnings) {
-      warningRows.push([
-        item.regionName,
-        item.areaName,
-        item.programName,
-        item.npp,
-        item.orderCode,
-        item.discount,
-        item.reason
-      ]);
-    }
-
-    XLSX.utils.book_append_sheet(
-      workbook,
-      XLSX.utils.aoa_to_sheet(warningRows),
-      "Cảnh báo"
-    );
-
-
     XLSX.writeFile(
       workbook,
       `Tracking_phan_bo_${month}.xlsx`
@@ -1915,7 +1756,7 @@ export default function Home() {
 
                 <li>
                   Dữ liệu không có mapping hoặc không có phân bổ
-                  được đưa vào cảnh báo, không cộng KPI.
+                  không được cộng vào KPI.
                 </li>
               </ul>
             </div>
@@ -2341,91 +2182,6 @@ export default function Home() {
       )}
 
 
-      {/* CẢNH BÁO */}
-
-      {report && (
-        <section className="panel">
-
-          <div className="sectionHeadingRow">
-            <div>
-              <h2 className="sectionTitle">
-                Cảnh báo dữ liệu
-              </h2>
-
-              <p className="muted">
-                Bao gồm mã CT chưa có trong file Tên CT,
-                vùng không có phân bổ và đơn hàng thiếu mã.
-              </p>
-            </div>
-
-            <span className="warningCount">
-              {warnings.length} cảnh báo
-            </span>
-          </div>
-
-
-          <div className="tablewrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Miền</th>
-                  <th>Vùng</th>
-                  <th>Tên CT</th>
-                  <th>Mã đơn hàng</th>
-                  <th>NPP</th>
-                  <th className="num">Tổng AK</th>
-                  <th>Lý do</th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {warnings.map((item, index) => (
-                  <tr
-                    key={
-                      item.areaName +
-                      item.programName +
-                      item.orderCode +
-                      index
-                    }
-                  >
-                    <td>
-                      {item.regionName || "Chưa xác định"}
-                    </td>
-
-                    <td>{item.areaName}</td>
-
-                    <td>{item.programName}</td>
-
-                    <td>
-                      {item.orderCode || "(Trống)"}
-                    </td>
-
-                    <td>
-                      {item.npp || "(Trống)"}
-                    </td>
-
-                    <td className="num">
-                      {money(item.discount)}
-                    </td>
-
-                    <td>{item.reason}</td>
-                  </tr>
-                ))}
-
-                {warnings.length === 0 && (
-                  <tr>
-                    <td colSpan={7} className="noData">
-                      Không có dữ liệu cảnh báo.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-
       {/* CỬA SỔ TRA CỨU SUẤT ĐÃ DÙNG */}
 
       {selectedUsedScope && (
@@ -2587,8 +2343,8 @@ export default function Home() {
 
       <footer className="footer">
         Dashboard theo dõi phân bổ CTKM / CTTL.
-        Kiểm tra cảnh báo và đối chiếu số liệu trước khi
-        sử dụng làm báo cáo chính thức.
+        Đối chiếu số liệu trước khi sử dụng
+        làm báo cáo chính thức.
       </footer>
 
     </main>
