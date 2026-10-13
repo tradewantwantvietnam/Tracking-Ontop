@@ -37,10 +37,11 @@ async function gzipToBase64(
 
 
 // ==================================================
-// TỰ ĐỘNG NÉN DỮ LIỆU KHI LƯU BÁO CÁO
+// XỬ LÝ TRƯỚC KHI GỬI LƯU BÁO CÁO
 //
-// Khi trang gửi POST đến /api/save kèm báo cáo,
-// dữ liệu được nén gzip trước khi gửi đi.
+// 1. Bỏ toàn bộ cảnh báo (không gửi, không lưu).
+// 2. Nén gzip để request nhỏ hơn giới hạn của Vercel.
+//
 // Các request khác không bị ảnh hưởng.
 // ==================================================
 
@@ -52,6 +53,8 @@ export default function GzipUpload() {
       input: RequestInfo | URL,
       init?: RequestInit
     ): Promise<Response> => {
+      let nextInit: RequestInit | undefined = init;
+
       try {
         const rawUrl =
           typeof input === "string"
@@ -69,55 +72,67 @@ export default function GzipUpload() {
           url.pathname === "/api/save" &&
           String(init?.method || "GET").toUpperCase() ===
             "POST" &&
-          typeof init?.body === "string" &&
-          typeof CompressionStream !== "undefined";
+          typeof init?.body === "string";
 
         if (isSaveRequest) {
           const payload = JSON.parse(init!.body as string);
 
-          // Chỉ nén request lưu báo cáo đầy đủ.
+          // Chỉ xử lý request lưu báo cáo đầy đủ.
           if (payload && payload.report) {
-            const data = await gzipToBase64(
-              JSON.stringify({
-                allocation: payload.allocation,
-                programMap: payload.programMap,
-                report: payload.report
-              })
-            );
 
-            const body = JSON.stringify({
-              month: payload.month,
-              encoding: "gzip-base64",
-              data
-            });
+            // Bỏ hết cảnh báo.
+            payload.report.warnings = [];
 
-            if (body.length > MAX_BODY_CHARS) {
-              throw new Error(
-                "Dữ liệu sau khi nén vẫn quá lớn (" +
-                (body.length / 1024 / 1024).toFixed(1) +
-                " MB, giới hạn khoảng 4,3 MB). " +
-                "Cần chuyển sang gửi trực tiếp lên Apps Script."
+            let body: string;
+
+            if (typeof CompressionStream !== "undefined") {
+              const data = await gzipToBase64(
+                JSON.stringify({
+                  allocation: payload.allocation,
+                  programMap: payload.programMap,
+                  report: payload.report
+                })
               );
+
+              body = JSON.stringify({
+                month: payload.month,
+                encoding: "gzip-base64",
+                data
+              });
+
+            } else {
+              // Trình duyệt không hỗ trợ nén:
+              // vẫn gửi bình thường nhưng đã bỏ cảnh báo.
+              body = JSON.stringify(payload);
             }
 
-            return originalFetch(input, {
+            nextInit = {
               ...init,
               body
-            });
+            };
           }
         }
 
-      } catch (error) {
-        // Lỗi dung lượng phải hiện cho người dùng.
-        if (
-          error instanceof Error &&
-          error.message.startsWith("Dữ liệu sau khi nén")
-        ) {
-          throw error;
-        }
+      } catch {
+        // Nếu xử lý lỗi, gửi nguyên yêu cầu ban đầu.
+        nextInit = init;
       }
 
-      return originalFetch(input, init);
+      // Báo rõ nếu dữ liệu vẫn vượt giới hạn của Vercel.
+      if (
+        nextInit !== init &&
+        typeof nextInit?.body === "string" &&
+        nextInit.body.length > MAX_BODY_CHARS
+      ) {
+        throw new Error(
+          "Dữ liệu sau khi nén vẫn quá lớn (" +
+          (nextInit.body.length / 1024 / 1024).toFixed(1) +
+          " MB, giới hạn khoảng 4,3 MB). " +
+          "Cần chuyển sang gửi trực tiếp lên Apps Script."
+        );
+      }
+
+      return originalFetch(input, nextInit);
     };
 
     return () => {
